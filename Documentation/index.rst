@@ -101,21 +101,6 @@ Gramine image.
    Use <buildtype> value ``release``, ``debug`` or ``debugoptimized`` to
    compile Gramine in the corresponding mode. Default: ``release``.
 
-..
-  TODO: Drop `-d` option with GSC v1.6 release
-
-.. option:: -d, --debug
-
-   Compile Gramine with debug flags and debug output.
-
-   .. deprecated:: 1.5
-      Use :option:`--buildtype`.
-
-.. option:: -L
-
-   Compile Gramine with Linux PAL in addition to Linux-SGX PAL. If configured
-   to use a prebuilt Gramine image, the image has to support this option.
-
 .. option:: --insecure-args
 
    Allow untrusted arguments to be specified at :command:`docker run`. Otherwise
@@ -201,22 +186,6 @@ parameter `Gramine.Image`.
 
    Use <buildtype> value ``release``, ``debug`` or ``debugoptimized`` to
    compile Gramine in the corresponding mode. Default: ``release``.
-
-..
-  TODO: Drop `-d` option with GSC v1.6 release
-
-.. option:: -d, --debug
-
-   Compile Gramine with debug flags and debug output.
-
-   .. deprecated:: 1.5
-      Use :option:`--buildtype`.
-
-.. option:: -L
-
-   Compile Gramine with Linux PAL in addition to Linux-SGX PAL. Allows
-   :command:`gsc build` commands to include the Linux PAL using :option:`-L
-   <gsc-build -L>`.
 
 .. option:: --no-cache
 
@@ -342,8 +311,14 @@ in :file:`config.yaml.template`.
    Defines Linux distribution to be used to build Gramine in. This distro should
    match the distro underlying the application's Docker image; otherwise the
    results may be unpredictable. Currently supported distros are Ubuntu 20.04,
-   Ubuntu 21.04, Debian 10, Debian 11 and CentOS 8. Default value is
-   ``ubuntu:20.04``.
+   Ubuntu 21.04, Ubuntu 22.04, Ubuntu 23.04, Debian 10, Debian 11, Debian 12,
+   CentOS 8, Red Hat Universal Base Image (UBI) 8 and Red Hat Universal Base
+   Image (UBI) 8 minimal. Default value is ``ubuntu:20.04``.
+
+   .. warning::
+      Please register and subscribe your host RHEL system to the Red Hat
+      Customer Portal to use Red Hat Universal Base Image (UBI) 8 and
+      UBI8-minimal distros.
 
 .. describe:: Registry
 
@@ -416,8 +391,7 @@ executable arguments may be supplied to the :command:`docker run` command.
 Execute with Linux PAL instead of Linux-SGX PAL
 -----------------------------------------------
 
-When specifying :option:`-L <gsc-build -L>`  during GSC :command:`gsc build`,
-you may select the Linux PAL at Docker run time instead of the Linux-SGX PAL by
+You may select the Linux PAL at Docker run time instead of the Linux-SGX PAL by
 specifying the environment variable :envvar:`GSC_PAL` as an option to the
 :command:`docker run` command. When using the Linux PAL, it is not necessary to
 sign the image via a :command:`gsc sign-image` command.
@@ -524,9 +498,10 @@ Operating System dependency
 
 GSC relies on Gramine to execute Linux applications inside Intel SGX enclaves and
 the installation of prerequisites depends on package manager and package
-repositories. Docker images based on Ubuntu and CentOS are supported by GSC.
-GSC can simply be extended to support other distributions by
-providing a set of templates for this distribution in :file:`templates/`.
+repositories. Docker images based on Ubuntu, CentOS and Red Hat Universal Base
+Image are supported by GSC. GSC can simply be extended to support other
+distributions by providing a set of templates for this distribution in
+:file:`templates/`.
 
 Trusted data in Docker volumes
 ------------------------------

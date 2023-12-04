@@ -1,29 +1,33 @@
 {% extends "Dockerfile.common.build.template" %}
 
 {% block install %}
-RUN sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-Linux-* &&\
-    sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-Linux-* &&\
-    sed -i 's/enabled=0/enabled=1/g' /etc/yum.repos.d/CentOS-Linux-PowerTools.repo
+COPY redhat.repo /etc/yum.repos.d/
+COPY pki/entitlement/ /etc/pki/entitlement/
+COPY redhat-uep.pem /etc/rhsm/ca/
 
 # Combine all installation and removal steps in a single RUN command to reduce the final image size.
 # This is because each Dockerfile command creates a new layer which necessarily adds size to the
 # final image. This trick allows to decrease the image size by hundreds of MBs.
-RUN dnf update -y \
-    &&  dnf install -y \
+RUN rm -rf /etc/rhsm-host \
+    && subscription-manager repos --enable codeready-builder-for-rhel-8-x86_64-rpms \
+    && dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm \
+    && dnf update -y \
+    && dnf install -y \
         binutils \
-        epel-release \
         openssl \
+        pkgconfig \
         protobuf-c-devel \
         python3 \
         python3-cryptography \
         python3-pip \
         python3-protobuf \
-    && /usr/bin/python3 -B -m pip install click jinja2 protobuf \
+        python3-pyelftools \
+        wget \
+    && /usr/bin/python3 -B -m pip install click jinja2 \
                                           'tomli>=1.1.0' 'tomli-w>=0.4.0' \
     && dnf repolist \
-# Install pyelftools after the installation of epel-release as it is provided by the EPEL repo
-    && dnf install -y python3-pyelftools \
-    && dnf -y clean all
+    && dnf -y clean all \
+    && rm -rf /etc/yum.repos.d/redhat.repo /etc/pki/entitlement/* /etc/rhsm/ca/redhat-uep.pem
 
 {% if buildtype != "release" %}
 RUN dnf install -y \
@@ -31,7 +35,6 @@ RUN dnf install -y \
         less \
         libunwind \
         python3-pytest \
-        strace \
-        vim
+        strace
 {% endif %}
 {% endblock %}

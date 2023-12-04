@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: LGPL-3.0-or-later
+# SPDX-License-Identifier: BSD-3-Clause
 # Copyright (C) 2020-2021 Intel Corp.
 #                         Anjo Vahldiek-Oberwagner <anjo.lucas.vahldiek-oberwagner@intel.com>
 #                         Dmitrii Kuvaiskii <dmitrii.kuvaiskii@intel.com>
@@ -9,10 +9,12 @@ import json
 import hashlib
 import os
 import pathlib
+import re
 import shutil
 import struct
 import sys
 import tempfile
+import uuid
 
 import docker  # pylint: disable=import-error
 import jinja2
@@ -176,6 +178,55 @@ def merge_two_dicts(dict1, dict2, path=[]):
             dict1[key] = dict2[key]
     return dict1
 
+def handle_redhat_repo_configs(distro, tmp_build_path):
+    if distro not in {"redhat/ubi8", "redhat/ubi8-minimal"}:
+        return
+
+    repo_name = "rhel-8-for-x86_64-baseos-rpms"
+    with open('/etc/yum.repos.d/redhat.repo') as redhat_repo:
+        redhat_repo_contents = redhat_repo.read()
+
+        if not re.search(repo_name, redhat_repo_contents):
+            print(f'Cannot find {repo_name} in /etc/yum.repos.d/redhat.repo. '
+                  f'Register and subscribe your RHEL system to the Red Hat Customer '
+                  f'Portal using Red Hat Subscription-Manager.')
+            sys.exit(1)
+
+        shutil.copyfile('/etc/yum.repos.d/redhat.repo', tmp_build_path / 'redhat.repo')
+        pattern_sslclientkey = re.compile(r'(?<!#)sslclientkey\s*=\s*(.*)')
+        pattern_sslcacert = re.compile(r'(?<!#)sslcacert\s*=\s*(.*)')
+
+        match_sslclientkey = pattern_sslclientkey.search(redhat_repo_contents)
+        if match_sslclientkey:
+            sslclientkey_path = match_sslclientkey.group(1)
+            sslclientkey_dir = os.path.dirname(sslclientkey_path)
+        else:
+            print(f'Cannot find SSL client key path in /etc/yum.repos.d/redhat.repo. '
+                  f'Register and subscribe your RHEL system to the Red Hat Customer '
+                  f'Portal using Red Hat Subscription-Manager.')
+            sys.exit(1)
+
+        match_sslcacert = pattern_sslcacert.search(redhat_repo_contents)
+        if match_sslcacert:
+            sslcacert_path = match_sslcacert.group(1)
+        else:
+            print(f'Cannot find SSL CA certificate path in /etc/yum.repos.d/redhat.repo. '
+                  f'Register and subscribe your RHEL system to the Red Hat Customer '
+                  f'Portal using Red Hat Subscription-Manager.')
+            sys.exit(1)
+
+        # The `redhat-uep.pem` file is used to validate the authenticity of Red Hat Update Engine
+        # Proxy (UEP) server during updates and subscription management on the system.
+        shutil.copyfile(sslcacert_path, tmp_build_path / 'redhat-uep.pem')
+
+        if os.path.exists(tmp_build_path / 'pki'):
+            shutil.rmtree(tmp_build_path / 'pki')
+
+        # This directory stores the entitlement certificates for Red Hat subscriptions.
+        # These files are used to authenticate and verify that a system is entitled to receive
+        # software updates and support from Red Hat.
+        shutil.copytree(sslclientkey_dir, tmp_build_path / 'pki/entitlement')
+
 # Command 1: Build unsigned graminized Docker image from original app Docker image.
 def gsc_build(args):
     original_image_name = args.image                           # input original-app image name
@@ -237,18 +288,28 @@ def gsc_build(args):
     #   - base Docker image's environment variables
     #   - additional, user-provided manifest options
     entrypoint_manifest_render = env.get_template(f'{distro}/entrypoint.manifest.template').render()
-    entrypoint_manifest_dict = tomli.loads(entrypoint_manifest_render)
+    try:
+        entrypoint_manifest_dict = tomli.loads(entrypoint_manifest_render)
+    except Exception as e:
+        print(f'Failed to parse the "{distro}/entrypoint.manifest.template" file. Error:', e,
+              file=sys.stderr)
+        sys.exit(1)
 
     base_image_environment = extract_environment_from_image_config(original_image.attrs['Config'])
     base_image_dict = tomli.loads(base_image_environment)
 
     user_manifest_contents = ''
     if not os.path.exists(args.manifest):
-        raise FileNotFoundError(f'Manifest file {args.manifest} does not exist')
+        print(f'Manifest file "{args.manifest}" does not exist.', file=sys.stderr)
+        sys.exit(1)
     with open(args.manifest, 'r') as user_manifest_file:
         user_manifest_contents = user_manifest_file.read()
 
-    user_manifest_dict = tomli.loads(user_manifest_contents)
+        try:
+            user_manifest_dict = tomli.loads(user_manifest_contents)
+        except Exception as e:
+            print(f'Failed to parse the "{args.manifest}" file. Error:', e, file=sys.stderr)
+            sys.exit(1)
 
     # Support deprecated syntax: replace old-style TOML-dict (`sgx.trusted_files.key = "file:foo"`)
     # with new-style TOML-array (`sgx.trusted_files = ["file:foo"]`) in the user manifest
@@ -278,6 +339,8 @@ def gsc_build(args):
     # Intel's SGX PGP RSA-2048 key signing the intel-sgx/sgx_repo repository. Expires 2027-03-20.
     # Available at https://download.01.org/intel-sgx/sgx_repo/ubuntu/intel-sgx-deb.key
     shutil.copyfile('keys/intel-sgx-deb.key', tmp_build_path / 'intel-sgx-deb.key')
+
+    handle_redhat_repo_configs(distro, tmp_build_path)
 
     build_docker_image(docker_socket.api, tmp_build_path, unsigned_image_name, 'Dockerfile.build',
                        rm=args.rm, nocache=args.no_cache, buildargs=extract_build_args(args))
@@ -337,6 +400,8 @@ def gsc_build_gramine(args):
     # Available at https://download.01.org/intel-sgx/sgx_repo/ubuntu/intel-sgx-deb.key
     shutil.copyfile('keys/intel-sgx-deb.key', tmp_build_path / 'intel-sgx-deb.key')
 
+    handle_redhat_repo_configs(distro, tmp_build_path)
+
     build_docker_image(docker_socket.api, tmp_build_path, gramine_image_name, 'Dockerfile.compile',
                        rm=args.rm, nocache=args.no_cache, buildargs=extract_build_args(args))
 
@@ -381,20 +446,22 @@ def gsc_sign_image(args):
     with open(tmp_build_path / 'Dockerfile.sign', 'w') as dockerfile:
         dockerfile.write(sign_template.render(image=unsigned_image_name))
 
-    # copy user-provided signing key and signing Bash script to our tmp build dir (to copy them
-    # later inside Docker image)
+    # copy user-provided signing key to our tmp build dir (to copy it later inside Docker image)
     tmp_build_key_path = tmp_build_path / 'gsc-signer-key.pem'
-    tmp_build_sign_path = tmp_build_path / 'sign.sh'
     shutil.copyfile(os.path.abspath(args.key), tmp_build_key_path)
-    shutil.copy(os.path.abspath('sign.sh'), tmp_build_sign_path)
 
+    build_id = uuid.uuid4().hex
     try:
         # `forcerm` parameter forces removal of intermediate Docker images even after unsuccessful
         # builds, to not leave the signing key lingering in any Docker containers
         build_docker_image(docker_socket.api, tmp_build_path, signed_image_name, 'Dockerfile.sign',
-                           forcerm=True, buildargs={"passphrase": args.passphrase})
+                           forcerm=True, buildargs={'passphrase': args.passphrase,
+                           'BUILD_ID': build_id})
     finally:
         os.remove(tmp_build_key_path)
+        # Remove a temporary image created during multistage docker build to save disk space.
+        # Please note that removing the image doesn't assure security.
+        docker_socket.api.prune_images(filters={'label': 'build_id=' + build_id})
 
     if get_docker_image(docker_socket, signed_image_name) is None:
         print(f'Failed to build a signed graminized Docker image `{signed_image_name}`.')
@@ -404,7 +471,7 @@ def gsc_sign_image(args):
           f'`{unsigned_image_name}`.')
 
 
-# Simplified version of read_sigstruct from python/graminelibos/sgx_get_token.py
+# Simplified version of `Sigstruct.from_bytes()` from python/graminelibos/sigstruct.py
 def read_sigstruct(sig):
     # Offsets for fields in SIGSTRUCT (defined by the SGX HW architecture, they never change)
     SGX_ARCH_ENCLAVE_CSS_DATE = 20
@@ -416,19 +483,27 @@ def read_sigstruct(sig):
     SGX_ARCH_ENCLAVE_CSS_MISC_SELECT = 900
     # Field format: (offset, type, value)
     fields = {
-        'date': (SGX_ARCH_ENCLAVE_CSS_DATE, '<HBB', 'year', 'month', 'day'),
-        'modulus': (SGX_ARCH_ENCLAVE_CSS_MODULUS, '384s', 'modulus'),
-        'enclave_hash': (SGX_ARCH_ENCLAVE_CSS_ENCLAVE_HASH, '32s', 'enclave_hash'),
-        'isv_prod_id': (SGX_ARCH_ENCLAVE_CSS_ISV_PROD_ID, '<H', 'isv_prod_id'),
-        'isv_svn': (SGX_ARCH_ENCLAVE_CSS_ISV_SVN, '<H', 'isv_svn'),
-        'attributes': (SGX_ARCH_ENCLAVE_CSS_ATTRIBUTES, '8s8s', 'flags', 'xfrms'),
-        'misc_select': (SGX_ARCH_ENCLAVE_CSS_MISC_SELECT, '4s', 'misc_select'),
+        'date_year': (SGX_ARCH_ENCLAVE_CSS_DATE + 2, '<H'),
+        'date_month': (SGX_ARCH_ENCLAVE_CSS_DATE + 1, '<B'),
+        'date_day': (SGX_ARCH_ENCLAVE_CSS_DATE, '<B'),
+        'modulus': (SGX_ARCH_ENCLAVE_CSS_MODULUS, '384s'),
+        'enclave_hash': (SGX_ARCH_ENCLAVE_CSS_ENCLAVE_HASH, '32s'),
+        'isv_prod_id': (SGX_ARCH_ENCLAVE_CSS_ISV_PROD_ID, '<H'),
+        'isv_svn': (SGX_ARCH_ENCLAVE_CSS_ISV_SVN, '<H'),
+        'flags': (SGX_ARCH_ENCLAVE_CSS_ATTRIBUTES, '8s'),
+        'xfrms': (SGX_ARCH_ENCLAVE_CSS_ATTRIBUTES + 8, '8s'),
+        'misc_select': (SGX_ARCH_ENCLAVE_CSS_MISC_SELECT, '4s'),
     }
     attr = {}
-    for field in fields.values():
-        values = struct.unpack_from(field[1], sig, field[0])
-        for i, value in enumerate(values):
-            attr[field[i + 2]] = value
+    for key, (offset, fmt) in fields.items():
+        if key in ['date_year', 'date_month', 'date_day']:
+            try:
+                attr[key] = int(f'{struct.unpack_from(fmt, sig, offset)[0]:x}')
+            except ValueError:
+                print(f'Misencoded {key} in SIGSTRUCT!', file=sys.stderr)
+                raise
+            continue
+        attr[key] = struct.unpack_from(fmt, sig, offset)[0]
 
     return attr
 
@@ -462,7 +537,8 @@ def gsc_info_image(args):
             sigstruct['mr_signer'] = mrsigner.digest().hex()
             sigstruct['isv_prod_id'] = attr['isv_prod_id']
             sigstruct['isv_svn'] = attr['isv_svn']
-            sigstruct['date'] = '%d-%02d-%02d' % (attr['year'], attr['month'], attr['day'])
+            sigstruct['date'] = '%d-%02d-%02d' % (
+                attr['date_year'], attr['date_month'], attr['date_day'])
             sigstruct['flags'] = attr['flags'].hex()
             sigstruct['xfrms'] = attr['xfrms'].hex()
             sigstruct['misc_select'] = attr['misc_select'].hex()
@@ -485,11 +561,6 @@ sub_build.set_defaults(command=gsc_build)
 sub_build.add_argument('-b', '--buildtype', choices=['release', 'debug', 'debugoptimized'],
     default='release', help='Compile Gramine in release, debug or debugoptimized mode.')
 
-# TODO: Drop `-d` option with GSC v1.6 release
-sub_build.add_argument('-d', '--debug', action='store_const', dest='buildtype',
-    const='debug', help='Compile Gramine with debug flags and output (deprecated).')
-sub_build.add_argument('-L', '--linux', action='store_true',
-    help='Compile Gramine with Linux PAL in addition to Linux-SGX PAL.')
 sub_build.add_argument('--insecure-args', action='store_true',
     help='Allow to specify untrusted arguments during Docker run. '
          'Otherwise arguments are ignored.')
@@ -510,11 +581,6 @@ sub_build_gramine.set_defaults(command=gsc_build_gramine)
 sub_build_gramine.add_argument('-b', '--buildtype', choices=['release', 'debug', 'debugoptimized'],
     default='release', help='Compile Gramine in release, debug or debugoptimized mode.')
 
-# TODO: Drop `-d` option with GSC v1.6 release
-sub_build_gramine.add_argument('-d', '--debug', action='store_const', dest='buildtype',
-    const='debug', help='Compile Gramine with debug flags and output (deprecated).')
-sub_build_gramine.add_argument('-L', '--linux', action='store_true',
-    help='Compile Gramine with Linux PAL in addition to Linux-SGX PAL.')
 sub_build_gramine.add_argument('-nc', '--no-cache', action='store_true',
     help='Build graminized Docker image without any cached images.')
 sub_build_gramine.add_argument('--rm', action='store_true',
@@ -535,7 +601,7 @@ sub_sign.add_argument('-c', '--config_file', type=argparse.FileType('r', encodin
     default='config.yaml', help='Specify configuration file.')
 sub_sign.add_argument('image', help='Name of the application (base) Docker image.')
 sub_sign.add_argument('key', help='Key to sign the Intel SGX enclaves inside the Docker image.')
-sub_sign.add_argument('-p', '--passphrase', help='Passphrase for the signing key.')
+sub_sign.add_argument('-p', '--passphrase', "--password", help='Passphrase for the signing key.')
 sub_sign.add_argument('-D','--define', action='append', default=[],
     help='Set image sign-time variables.')
 sub_sign.add_argument('--remove-gramine-deps', action='append_const', dest='define',
