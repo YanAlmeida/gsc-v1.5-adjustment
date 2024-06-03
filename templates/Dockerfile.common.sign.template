@@ -10,6 +10,14 @@ COPY gsc-signer-key.pem /gramine/app_files/gsc-signer-key.pem
 
 ARG passphrase
 
+{% block install %}
+RUN apt-get update -y && \
+    apt-get install -y python3-pip && \
+    pip3 install voluptuous==0.14.2 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+{% endblock %}
+
 RUN {% block path %}{% endblock %} gramine-sgx-sign \
       --key /gramine/app_files/gsc-signer-key.pem \
       --manifest /gramine/app_files/entrypoint.manifest \
